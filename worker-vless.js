@@ -2,38 +2,27 @@
 // @ts-ignore
 import { connect } from 'cloudflare:sockets';
 let config={
-	userID: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
+	iduu: 'd342d11e-d424-4583-b36e-524ab1f0afa4',
 	ips: [],
 	subpath: 'ss',
 	pxyIP: 'cdn.xn--b6gac.eu.org', 
 }
-if (!isValidUUID(userID)) {
+if (!isValidUUID(config.iduu)) {
 	throw new Error('uuid is not valid');
 }
 
 export default {
 	async fetch(request, env, ctx) {
 		try {
-			userID = env.UUID || config.userID;
-			pxyIP = env.pxyIP || config.pxyIP;
-			ips = env.IPS || config.ips;
-			subpath = env.SUBPATH || config.subpath;
-			ips = ips.split('\n');
+			let iduu = env.UUID || config.iduu;
+			let pxyIP = env.pxyIP || config.pxyIP;
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
 				const url = new URL(request.url);
 				switch (url.pathname) {
 					case '/':
 						return new Response(JSON.stringify(request.cf), { status: 200 });
-					case `/${subpath}`: {
-						const vlsConfig = getvlsConfig(userID, request.headers.get('Host'), ips);
-						return new Response(`${vlsConfig}`, {
-							status: 200,
-							headers: {
-								"Content-Type": "text/plain;charset=utf-8",
-							}
-						});
-					}
+
 					default:
 						return new Response('Not found', { status: 404 });
 				}
@@ -69,15 +58,12 @@ async function vlsOverWSHandler(request) {
 	let remoteSocketWapper = {
 		value: null,
 	};
-	let udpStreamWrite = null;
-	let isDns = false;
+
 
 	// ws --> remote
 	readableWebSocketStream.pipeTo(new WritableStream({
 		async write(chunk, controller) {
-			if (isDns && udpStreamWrite) {
-				return udpStreamWrite(chunk);
-			}
+
 			if (remoteSocketWapper.value) {
 				const writer = remoteSocketWapper.value.writable.getWriter()
 				await writer.write(chunk);
@@ -93,7 +79,7 @@ async function vlsOverWSHandler(request) {
 				rawDataIndex,
 				vlsVersion = new Uint8Array([0, 0]),
 				isUDP,
-			} = processvlsHeader(chunk, userID);
+			} = processvlsHeader(chunk, iduu);
 			address = addressRemote;
 			portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '
 				} `;
@@ -103,26 +89,15 @@ async function vlsOverWSHandler(request) {
 				// webSocket.close(1000, message);
 				return;
 			}
-			// if UDP but port not DNS port, close it
 			if (isUDP) {
-				if (portRemote === 53) {
-					isDns = true;
-				} else {
-					// controller.error('UDP pxy only enable for DNS which is port 53');
-					throw new Error('UDP pxy only enable for DNS which is port 53'); // cf seems has bug, controller.error will not end stream
-					return;
-				}
+				throw new Error('UDP is not supported');
 			}
 			// ["version", "附加信息长度 N"]
 			const vlsResponseHeader = new Uint8Array([vlsVersion[0], 0]);
 			const rawClientData = chunk.slice(rawDataIndex);
-
-			// TODO: support udp here when cf runtime has udp support
+			let isDns = false;
 			if (isDns) {
-				const { write } = await handleUDPOutBound(webSocket, vlsResponseHeader, log);
-				udpStreamWrite = write;
-				udpStreamWrite(rawClientData);
-				return;
+				throw new Error('UDP is not supported');
 			}
 			handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlsResponseHeader, log);
 		},
@@ -222,7 +197,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 }
 function processvlsHeader(
 	vlsBuffer,
-	userID
+	iduu
 ) {
 	if (vlsBuffer.byteLength < 24) {
 		return {
@@ -233,7 +208,7 @@ function processvlsHeader(
 	const version = new Uint8Array(vlsBuffer.slice(0, 1));
 	let isValidUser = false;
 	let isUDP = false;
-	if (stringify(new Uint8Array(vlsBuffer.slice(1, 17))) === userID) {
+	if (stringify(new Uint8Array(vlsBuffer.slice(1, 17))) === iduu) {
 		isValidUser = true;
 	}
 	if (!isValidUser) {
@@ -258,6 +233,14 @@ function processvlsHeader(
 			message: `command ${command} is not support, command 01-tcp,02-udp,03-mux`,
 		};
 	}
+	
+	if (isUDP) {
+		return {
+			hasError: true,
+			message: 'UDP is not supported',
+		};
+	}
+	
 	const portIndex = 18 + optLength + 1;
 	const portBuffer = vlsBuffer.slice(portIndex, portIndex + 2);
 	const portRemote = new DataView(portBuffer).getUint16(0);
@@ -411,70 +394,4 @@ function stringify(arr, offset = 0) {
 		throw TypeError("Stringified UUID is invalid");
 	}
 	return uuid;
-}
-
-
-async function handleUDPOutBound(webSocket, vlsResponseHeader, log) {
-
-	let isvlsHeaderSent = false;
-	const transformStream = new TransformStream({
-		start(controller) {
-
-		},
-		transform(chunk, controller) {
-			for (let index = 0; index < chunk.byteLength;) {
-				const lengthBuffer = chunk.slice(index, index + 2);
-				const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-				const udpData = new Uint8Array(
-					chunk.slice(index + 2, index + 2 + udpPakcetLength)
-				);
-				index = index + 2 + udpPakcetLength;
-				controller.enqueue(udpData);
-			}
-		},
-		flush(controller) {
-		}
-	});
-	transformStream.readable.pipeTo(new WritableStream({
-		async write(chunk) {
-			const resp = await fetch('https://1.1.1.1/dns-query',
-				{
-					method: 'POST',
-					headers: {
-						'content-type': 'application/dns-message',
-					},
-					body: chunk,
-				})
-			const dnsQueryResult = await resp.arrayBuffer();
-			const udpSize = dnsQueryResult.byteLength;
-			const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
-			if (webSocket.readyState === WS_READY_STATE_OPEN) {
-				log(`doh success and dns message length is ${udpSize}`);
-				if (isvlsHeaderSent) {
-					webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-				} else {
-					webSocket.send(await new Blob([vlsResponseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-					isvlsHeaderSent = true;
-				}
-			}
-		}
-	})).catch((error) => {
-		log('dns udp has error' + error)
-	});
-
-	const writer = transformStream.writable.getWriter();
-
-	return {
-		write(chunk) {
-			writer.write(chunk);
-		}
-	};
-}
-
-function getvlsConfig(userID, hostName,ips) {
-	let vlsMain = '';
-	for (let ip of ips) {
-		vlsMain += `vls://${userID}\u0040${ip}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}\n`
-	}
-	return `${vlsMain}`;
 }
