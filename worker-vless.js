@@ -79,7 +79,7 @@ async function vlsOverWSHandler(request) {
 				rawDataIndex,
 				vlsVersion = new Uint8Array([0, 0]),
 				isUDP,
-			} = processvlsHeader(chunk, iduu);
+			} = processvlsHeader(chunk, config.iduu);
 			address = addressRemote;
 			portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '
 				} `;
